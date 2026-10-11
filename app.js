@@ -3,8 +3,8 @@
  * 利用者が「ファイル」アプリから取り込み、端末の中（IndexedDB）に保存する。
  */
 'use strict';
-const APP_VERSION = '0.1.1';
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
+const APP_VERSION = '0.2.2';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
 marked.setOptions({ mangle: false, headerIds: false });
 
 // ───────── 保存（IndexedDB） ─────────
@@ -277,6 +277,11 @@ document.addEventListener('keydown', (e) => {
   $('sheetBack').addEventListener('click', () => { st.sheetStack.pop(); const f = st.sheetStack.pop(); (f || openMenu)(); });
 })();
 
+// iPhone の Safari では拡大の指定が効かないため、ダブルタップやピンチでの拡大を止める
+['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
+document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
+window.addEventListener('scroll', () => { if (window.scrollY || window.scrollX) window.scrollTo(0, 0); });
+
 function sheetShow(title, html, { full = false, back = false } = {}) {
   document.querySelectorAll('#sheetBody video, #sheetBody audio').forEach((m) => m.pause());
   $('sheetTitle').textContent = title;
@@ -286,6 +291,7 @@ function sheetShow(title, html, { full = false, back = false } = {}) {
   const s = $('sheet');
   s.classList.add('open'); s.classList.toggle('full', full); s.setAttribute('aria-hidden', 'false');
   $('sheetShade').hidden = false;
+  window.scrollTo(0, 0);
 }
 function closeSheet() {
   const s = $('sheet');
@@ -664,6 +670,23 @@ async function importVideos(files) {
   setTimeout(openImport, 1200);
 }
 
+// ───────── iPad の横向き：2分割表示 ─────────
+const SPLIT_MQ = window.matchMedia('(orientation: landscape) and (min-width: 900px)');
+function applyLayout() {
+  const split = SPLIT_MQ.matches;
+  st.split = split;
+  document.body.classList.toggle('split', split);
+  st.rendered = { pdfNo: 0, canvas: null };
+  if (split) {
+    st.locked = false; $('lockBar').hidden = true; $('btnOrig').classList.remove('locked', 'on');
+    st.showingPdf = true; $('pdfView').hidden = false; renderPdf();
+  } else if (!st.locked) {
+    showPdf(false); prerenderPdf();
+  } else {
+    renderPdf();
+  }
+}
+
 // ───────── 起動 ─────────
 (async function start() {
   applySettings();
@@ -671,5 +694,7 @@ async function importVideos(files) {
   renderSummary(); prerenderPdf();
   if (!st.data) openImport();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-  window.addEventListener('resize', () => { st.rendered = { pdfNo: 0, canvas: null }; if (st.showingPdf) renderPdf(); else prerenderPdf(); });
+  applyLayout();
+  let rz = 0;
+  window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(applyLayout, 150); });
 })();
