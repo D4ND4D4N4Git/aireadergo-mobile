@@ -107,3 +107,12 @@ input[type=text],input[type=password],input[type=number]{font-size:16px; backgro
 #toast{position:fixed; left:50%; bottom:calc(120px + var(--safe-b)); transform:translateX(-50%); background:#22383f; color:var(--text);
   padding:10px 16px; border-radius:20px; font-size:14px; z-index:50; max-width:86vw; text-align:center}
 #toast[hidden]{display:none}
+
+/* iPad の横向き：左に原本（PDF）、右に要約の2分割（枠の位置は固定） */
+body.split #pdfView{right:auto; width:var(--splitL); bottom:var(--safe-b); border-right:1px solid var(--line)}
+body.split #summary{left:var(--splitL)}
+body.split #handle{left:var(--splitL)}
+body.split #sheet{left:var(--splitL)}
+body.split #sheetShade{left:var(--splitL)}
+body.split #btnOrig, body.split #lockBar{display:none}
+:root{--splitL:55%}
