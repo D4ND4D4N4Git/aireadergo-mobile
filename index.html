@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AIReaderGO">
+<meta name="theme-color" content="#0a1418">
+<title>AIReaderGO</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="top">
+  <button id="btnToc" class="icon" aria-label="目次">☰</button>
+  <div id="title"><div id="pg">AIReaderGO</div><div id="sec"></div></div>
+  <button id="btnSettings" class="icon" aria-label="設定">⚙</button>
+</header>
+
+<main id="summary" tabindex="-1"></main>
+
+<div id="pdfView" hidden>
+  <div id="pdfBox"><canvas id="pdfCanvas"></canvas><div id="pdfMsg"></div></div>
+  <div id="lockBar" hidden>原本を固定中 <button id="btnUnlock">要約に戻る</button></div>
+</div>
+
+<button id="btnOrig" aria-label="原本（押している間だけ表示。ダブルタップで固定）">原本</button>
+
+<div id="handle" role="button" aria-label="メニューを開く"><span></span></div>
+
+<section id="sheet" aria-hidden="true">
+  <div id="sheetHead">
+    <span class="grip"></span>
+    <button id="sheetBack" class="link" hidden>‹ 戻る</button>
+    <h2 id="sheetTitle">メニュー</h2>
+    <button id="sheetClose" class="link">閉じる</button>
+  </div>
+  <div id="sheetBody"></div>
+</section>
+<div id="sheetShade" hidden></div>
+
+<section id="panel" hidden>
+  <div id="panelHead"><h2 id="panelTitle"></h2><button id="panelClose" class="link">閉じる</button></div>
+  <div id="panelBody"></div>
+</section>
+
+<div id="toast" hidden></div>
+
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/pdf.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
