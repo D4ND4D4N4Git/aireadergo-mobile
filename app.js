@@ -3,8 +3,8 @@
  * 利用者が「ファイル」アプリから取り込み、端末の中（IndexedDB）に保存する。
  */
 'use strict';
-const APP_VERSION = '0.2.1';
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
+const APP_VERSION = '0.1.1';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
 marked.setOptions({ mangle: false, headerIds: false });
 
 // ───────── 保存（IndexedDB） ─────────
@@ -664,23 +664,6 @@ async function importVideos(files) {
   setTimeout(openImport, 1200);
 }
 
-// ───────── iPad の横向き：2分割表示 ─────────
-const SPLIT_MQ = window.matchMedia('(orientation: landscape) and (min-width: 900px)');
-function applyLayout() {
-  const split = SPLIT_MQ.matches;
-  st.split = split;
-  document.body.classList.toggle('split', split);
-  st.rendered = { pdfNo: 0, canvas: null };
-  if (split) {
-    st.locked = false; $('lockBar').hidden = true; $('btnOrig').classList.remove('locked', 'on');
-    st.showingPdf = true; $('pdfView').hidden = false; renderPdf();
-  } else if (!st.locked) {
-    showPdf(false); prerenderPdf();
-  } else {
-    renderPdf();
-  }
-}
-
 // ───────── 起動 ─────────
 (async function start() {
   applySettings();
@@ -688,7 +671,5 @@ function applyLayout() {
   renderSummary(); prerenderPdf();
   if (!st.data) openImport();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-  applyLayout();
-  let rz = 0;
-  window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(applyLayout, 150); });
+  window.addEventListener('resize', () => { st.rendered = { pdfNo: 0, canvas: null }; if (st.showingPdf) renderPdf(); else prerenderPdf(); });
 })();
