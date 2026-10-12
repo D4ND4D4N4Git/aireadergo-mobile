@@ -3,48 +3,84 @@
  * 利用者が「ファイル」アプリから取り込み、端末の中（IndexedDB）に保存する。
  */
 'use strict';
-const APP_VERSION = '0.2.2';
+const APP_VERSION = '0.3.1';
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
 marked.setOptions({ mangle: false, headerIds: false });
 
 // ───────── 保存（IndexedDB） ─────────
+const CHUNK = 4 * 1048576;   // 大きなファイルは 4MB ずつに分けて保存する
 const DB = {
   db: null,
   open() {
     return new Promise((ok, ng) => {
-      const r = indexedDB.open('aireadergo', 1);
-      r.onupgradeneeded = () => r.result.createObjectStore('files');
-      r.onsuccess = () => { this.db = r.result; ok(); };
+      if (!window.indexedDB) { ng(new Error('この画面では端末に保存できません（プライベートブラウズでは使えません）')); return; }
+      const r = indexedDB.open('aireadergo', 2);
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains('files')) db.createObjectStore('files');
+        if (!db.objectStoreNames.contains('chunks')) db.createObjectStore('chunks');
+      };
+      r.onsuccess = () => { this.db = r.result; this.db.onversionchange = () => this.db.close(); ok(); };
       r.onerror = () => ng(r.error);
+      r.onblocked = () => ng(new Error('別の画面で AIReaderGO が開いています。ほかのタブを閉じてから開き直してください'));
     });
   },
-  get(k) {
+  req(store, mode, fn) {
     return new Promise((ok, ng) => {
-      const r = this.db.transaction('files').objectStore('files').get(k);
-      r.onsuccess = () => ok(r.result); r.onerror = () => ng(r.error);
+      const t = this.db.transaction(store, mode);
+      let out;
+      const r = fn(t.objectStore(store));
+      if (r) r.onsuccess = () => { out = r.result; };
+      t.oncomplete = () => ok(out);
+      t.onerror = () => ng(t.error || (r && r.error));
+      t.onabort = () => ng(t.error || new Error('保存が中断されました'));
     });
   },
-  put(k, v) {
-    return new Promise((ok, ng) => {
-      const t = this.db.transaction('files', 'readwrite');
-      t.objectStore('files').put(v, k);
-      t.oncomplete = () => ok(); t.onerror = () => ng(t.error); t.onabort = () => ng(t.error);
-    });
+  get(k) { return this.req('files', 'readonly', (o) => o.get(k)); },
+  put(k, v) { return this.req('files', 'readwrite', (o) => { o.put(v, k); }); },
+  keys() { return this.req('files', 'readonly', (o) => o.getAllKeys()); },
+  range(k) { return IDBKeyRange.bound(k + '#', k + '#￿'); },
+  async del(k) {
+    await this.req('files', 'readwrite', (o) => { o.delete(k); });
+    await this.req('chunks', 'readwrite', (o) => { o.delete(this.range(k)); });
   },
-  del(k) {
-    return new Promise((ok, ng) => {
-      const t = this.db.transaction('files', 'readwrite');
-      t.objectStore('files').delete(k);
-      t.oncomplete = () => ok(); t.onerror = () => ng(t.error);
-    });
+  // ファイルを小分けにして端末に保存する（選んだファイルの中身を実際に読み、端末の中にコピーする）
+  async putFile(k, file, meta, onProgress) {
+    await this.del(k);
+    const type = file.type || meta.type || 'application/octet-stream';
+    const n = Math.max(1, Math.ceil(file.size / CHUNK));
+    for (let i = 0; i < n; i++) {
+      let buf;
+      try { buf = await file.slice(i * CHUNK, Math.min(file.size, (i + 1) * CHUNK)).arrayBuffer(); }
+      catch (e) { throw readError(e); }
+      const part = new Blob([buf], { type });
+      await this.req('chunks', 'readwrite', (o) => { o.put(part, k + '#' + String(i).padStart(6, '0')); });
+      if (onProgress) onProgress((i + 1) / n);
+    }
+    await this.put(k, Object.assign({}, meta, { chunked: true, n, size: file.size, type, t: Date.now() }));
   },
-  keys() {
-    return new Promise((ok, ng) => {
-      const r = this.db.transaction('files').objectStore('files').getAllKeys();
-      r.onsuccess = () => ok(r.result); r.onerror = () => ng(r.error);
-    });
+  // 保存したファイルを1つのファイルとして取り出す（中身はメモリに読み込まない）
+  async getFile(k) {
+    const m = await this.get(k);
+    if (!m) return null;
+    if (m.blob) return Object.assign({}, m);   // 0.2 までの保存形式
+    if (!m.chunked) return null;
+    const parts = await this.req('chunks', 'readonly', (o) => o.getAll(this.range(k)));
+    if (!parts || parts.length !== m.n) throw new Error(`保存したファイルが欠けています（${parts ? parts.length : 0}/${m.n}）。取り込み直してください`);
+    const blob = new Blob(parts, { type: m.type });
+    if (blob.size !== m.size) throw new Error('保存したファイルの大きさが違います。取り込み直してください');
+    return Object.assign({}, m, { blob });
   },
 };
+function readError(e) {
+  return new Error('選んだファイルを読めませんでした。「ファイル」アプリでそのファイルを一度開く（iPhone にダウンロードする）か、' +
+    '「このiPhone内」にコピーしてから選び直してください（' + (e && (e.name || e.message)) + '）');
+}
+function saveError(e) {
+  const name = e && (e.name || ''), msg = e && (e.message || '');
+  if (name === 'QuotaExceededError' || /quota|space|容量/i.test(msg)) return '端末の空き容量（このアプリの保存できる量）が足りません。動画を減らすか、iPhone の空き容量を増やしてください';
+  return msg || name || String(e);
+}
 
 // ───────── 設定・記録（端末内） ─────────
 const LS = {
@@ -52,7 +88,7 @@ const LS = {
   set(k, v) { try { localStorage.setItem('arg.' + k, JSON.stringify(v)); } catch (e) {} },
 };
 const S = Object.assign({
-  fontSize: 17, nextBy: 'left', holdMode: 'hold', apiKey: '', model: 'claude-sonnet-4-5', page: 27,
+  fontSize: 17, nextBy: 'left', holdMode: 'hold', layout: 'auto', apiKey: '', model: 'claude-sonnet-4-5', page: 27,
 }, LS.get('settings', {}));
 function saveSettings() { LS.set('settings', S); }
 
@@ -80,29 +116,38 @@ function objUrl(blob) { const u = URL.createObjectURL(blob); st.objectUrls.push(
 async function loadStored() {
   const d = await DB.get('data');
   st.data = d ? d.value : null;
-  const p = await DB.get('pdf');
+  st.loadErr = '';
+  let p = null;
+  try { p = await DB.getFile('pdf'); } catch (e) { st.loadErr = '原本 PDF：' + e.message; }
+  if (st.pdf) { try { st.pdf.destroy(); } catch (e) {} }
   st.pdfBlob = p ? p.blob : null;
-  st.pdf = null; st.pdfPages = p ? p.pages : 0;
-  const a = await DB.get('audio');
-  st.audio = a || null;
+  st.pdf = null; st.pdfErr = ''; st.pdfPages = p ? p.pages : 0;
+  st.audio = null;
+  try { const a = await DB.getFile('audio'); if (a) st.audio = { blob: a.blob, index: a.index }; } catch (e) { st.loadErr += ' 講義音声：' + e.message; }
   st.videos = {};
   for (const k of await DB.keys()) if (String(k).startsWith('video:')) st.videos[k.slice(6)] = true;
+  st.rendered = { pdfNo: 0, canvas: null };
 }
 
 // 全体をメモリに読み込まず、必要な部分だけ取り出して PDF.js に渡す
 function pdfFromBlob(blob) {
   const transport = new pdfjsLib.PDFDataRangeTransport(blob.size, null);
   transport.requestDataRange = (begin, end) => {
-    blob.slice(begin, end).arrayBuffer().then((buf) => transport.onDataRange(begin, new Uint8Array(buf)));
+    blob.slice(begin, end).arrayBuffer()
+      .then((buf) => transport.onDataRange(begin, new Uint8Array(buf)))
+      .catch((e) => { st.pdfErr = '保存した PDF を読めませんでした（' + (e.name || e.message) + '）'; });
   };
   return pdfjsLib.getDocument({ range: transport, length: blob.size, disableAutoFetch: true, disableStream: true,
     rangeChunkSize: 262144, isEvalSupported: false }).promise;
 }
-async function openPdf() {
-  if (st.pdf || !st.pdfBlob) return st.pdf;
-  st.pdf = await pdfFromBlob(st.pdfBlob);
-  st.pdfPages = st.pdf.numPages;
-  return st.pdf;
+let pdfOpening = null;
+function openPdf() {
+  if (st.pdf || !st.pdfBlob) return Promise.resolve(st.pdf);
+  if (!pdfOpening) {
+    pdfOpening = pdfFromBlob(st.pdfBlob).then((d) => { st.pdf = d; st.pdfPages = d.numPages; return d; })
+      .finally(() => { pdfOpening = null; });
+  }
+  return pdfOpening;
 }
 
 // ───────── ページ ─────────
@@ -140,25 +185,37 @@ function renderSummary() {
   }
   box.scrollTop = 0;
   $('btnOrig').disabled = !st.pdfBlob;
+  $('btnPrev').disabled = st.pdfNo <= 1;
+  $('btnNext').disabled = st.pdfNo >= maxPage();
 }
 
 // ───────── 原本（PDF）の表示 ─────────
 let renderSeq = 0;
+// 原本を表示する場所の大きさ（非表示のときも同じ値になるよう、ページ全体の枠から計算する）
+function pdfArea() {
+  const r = $('stage').getBoundingClientRect();
+  const lock = st.locked && !st.split ? ($('lockBar').offsetHeight || 36) : 0;
+  return { w: Math.max(100, st.split ? r.width * 0.55 - 1 : r.width), h: Math.max(100, r.height - lock) };
+}
+function withTimeout(pr, ms, msg) {
+  return Promise.race([pr, new Promise((_, ng) => setTimeout(() => ng(new Error(st.pdfErr || msg)), ms))]);
+}
 async function drawPage(pdfNo, canvas) {
-  const pdf = await openPdf();
+  const pdf = await withTimeout(openPdf(), 30000, 'PDF の読み込みに時間がかかりすぎています');
   if (!pdf || pdfNo > pdf.numPages) return false;
   const page = await pdf.getPage(pdfNo);
-  const box = $('pdfBox').getBoundingClientRect();
-  const w = box.width || window.innerWidth, h = box.height || (window.innerHeight - 100);
+  const { w, h } = pdfArea();
   const vp1 = page.getViewport({ scale: 1 });
   const scale = Math.min(w / vp1.width, h / vp1.height);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const vp = page.getViewport({ scale: scale * dpr });
   canvas.width = Math.floor(vp.width); canvas.height = Math.floor(vp.height);
   canvas.style.width = Math.floor(vp.width / dpr) + 'px'; canvas.style.height = Math.floor(vp.height / dpr) + 'px';
+  canvas.dataset.w = Math.round(w); canvas.dataset.h = Math.round(h);
   await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
   return true;
 }
+function refreshPdf() { if (st.showingPdf) renderPdf(); else prerenderPdf(); }
 async function prerenderPdf() {
   if (!st.pdfBlob) return;
   const seq = ++renderSeq, no = st.pdfNo;
@@ -169,13 +226,19 @@ async function prerenderPdf() {
 }
 async function renderPdf() {
   const msg = $('pdfMsg'), cv = $('pdfCanvas');
-  if (!st.pdfBlob) { msg.textContent = '原本の PDF がまだ取り込まれていません。'; cv.hidden = true; return; }
-  if (st.rendered.pdfNo === st.pdfNo && st.rendered.canvas) {
+  if (!st.pdfBlob) {
+    msg.innerHTML = st.loadErr ? esc(st.loadErr) : '原本の PDF がまだ取り込まれていません。<br>⚙ →「データの取り込み」の 2 から選んでください。';
+    cv.hidden = true; return;
+  }
+  const area = pdfArea();
+  const rc = st.rendered.canvas;
+  if (st.rendered.pdfNo === st.pdfNo && rc && Math.abs(rc.dataset.w - area.w) < 2 && Math.abs(rc.dataset.h - area.h) < 2) {
     const src = st.rendered.canvas;
     cv.width = src.width; cv.height = src.height; cv.style.width = src.style.width; cv.style.height = src.style.height;
     cv.getContext('2d').drawImage(src, 0, 0); cv.hidden = false; msg.textContent = ''; return;
   }
   msg.textContent = '読み込み中…';
+  if (st.rendered.pdfNo !== st.pdfNo) cv.hidden = true;
   try {
     const seq = ++renderSeq;
     const c = document.createElement('canvas');
@@ -184,7 +247,11 @@ async function renderPdf() {
     if (!ok) { msg.textContent = 'このページは PDF にありません。'; cv.hidden = true; return; }
     st.rendered = { pdfNo: st.pdfNo, canvas: c };
     renderPdf();
-  } catch (e) { msg.textContent = 'PDF を表示できませんでした：' + e.message; }
+  } catch (e) {
+    cv.hidden = true;
+    msg.textContent = 'PDF を表示できませんでした：' + (e.message || e) + '。⚙ →「データの取り込み」で原本 PDF を取り込み直してください。';
+    if (st.pdf == null) pdfOpening = null;
+  }
 }
 function showPdf(on) {
   st.showingPdf = on;
@@ -281,6 +348,8 @@ document.addEventListener('keydown', (e) => {
 ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
 document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
 window.addEventListener('scroll', () => { if (window.scrollY || window.scrollX) window.scrollTo(0, 0); });
+// 枠そのものが動いて上が見切れることがないよう、枠のスクロールは常に 0 に戻す
+['app', 'stage'].forEach((id) => $(id).addEventListener('scroll', (e) => { e.target.scrollTop = 0; e.target.scrollLeft = 0; }));
 
 function sheetShow(title, html, { full = false, back = false } = {}) {
   document.querySelectorAll('#sheetBody video, #sheetBody audio').forEach((m) => m.pause());
@@ -419,7 +488,8 @@ function showAudio() {
 // 講義動画：このページのチャプター位置から再生
 async function showVideo() {
   const e = entry(); if (!hasVideo(e)) return;
-  const v = await DB.get('video:' + e.note_id);
+  let v = null;
+  try { v = await DB.getFile('video:' + e.note_id); } catch (err) { toast(err.message, 5000); return; }
   if (!v) { toast('動画が見つかりません'); return; }
   const n = noteOf(e);
   revokeUrls();
@@ -474,7 +544,7 @@ async function askClaude() {
 function panel(title, html) {
   $('panelTitle').textContent = title; $('panelBody').innerHTML = html; $('panel').hidden = false; $('panelBody').scrollTop = 0;
 }
-$('panelClose').addEventListener('click', () => { $('panel').hidden = true; renderSummary(); });
+$('panelClose').addEventListener('click', () => { $('panel').hidden = true; renderSummary(); refreshPdf(); });
 
 $('btnToc').addEventListener('click', () => {
   if (!st.data) { openImport(); return; }
@@ -489,7 +559,10 @@ $('btnToc').addEventListener('click', () => {
   panel('目次', parts.join(''));
   $('jumpGo').onclick = () => { const p = +$('jump').value; if (p) { $('panel').hidden = true; goto(p + off); } };
   $('panelBody').querySelectorAll('.toc-sec').forEach((b) => (b.onclick = () => { $('panel').hidden = true; goto(+b.dataset.p); }));
-  const cur = $('panelBody').querySelector(`.toc-sec[data-p="${st.pdfNo}"]`); if (cur) cur.scrollIntoView();
+  // 今のページの節を目次の中だけでスクロールして見せる（scrollIntoView は画面全体まで動かすので使わない）
+  let cur = null;
+  $('panelBody').querySelectorAll('.toc-sec').forEach((b) => { if (+b.dataset.p <= st.pdfNo) cur = b; });
+  if (cur) { cur.classList.add('cur'); $('panelBody').scrollTop = Math.max(0, cur.offsetTop - $('panelBody').offsetTop - 120); }
 });
 
 $('btnSettings').addEventListener('click', openSettings);
@@ -501,6 +574,7 @@ function openSettings() {
     <div class="row"><label>文字の大きさ</label>${seg('fontSize', [[15, '小'], [17, '中'], [19, '大'], [22, '特大']], S.fontSize)}</div>
     <div class="row"><label>次のページへ</label>${seg('nextBy', [['left', '左へスワイプ'], ['right', '右へスワイプ']], S.nextBy)}</div>
     <div class="row"><label>「原本」ボタン</label>${seg('holdMode', [['hold', '押している間'], ['tap', 'タップで切替']], S.holdMode)}</div>
+    <div class="row"><label>2分割（原本｜要約）</label>${seg('layout', [['auto', '自動（iPad横）'], ['single', 'しない'], ['split', 'する']], S.layout)}</div>
     <p class="status">「原本」ボタンをダブルタップすると、原本の表示を固定します。</p>
     <div class="row"><label>Claude の APIキー<br><span class="status">端末の中だけに保存します</span></label></div>
     <input id="apiKey" type="password" autocomplete="off" value="${esc(S.apiKey)}" placeholder="sk-ant-…">
@@ -516,6 +590,7 @@ function openSettings() {
     const b = ev.target.closest('button'); if (!b) return;
     const name = g.dataset.name; let v = b.dataset.v; if (name === 'fontSize') v = +v;
     S[name] = v; saveSettings(); applySettings();
+    if (name === 'layout') applyLayout();
     g.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
   }));
   $('saveKey').onclick = () => { S.apiKey = $('apiKey').value.trim(); S.model = $('model').value.trim() || 'claude-sonnet-4-5'; saveSettings(); toast('保存しました'); };
@@ -556,12 +631,14 @@ async function openImport() {
   const nVideo = Object.keys(st.videos).length, nNotes = st.data ? st.data.notes.length : 35;
   const audioN = st.audio ? Object.keys(st.audio.index).length : 0;
   panel('データの取り込み', `
-    <p class="status">「ファイル」アプリに置いたファイルを選びます。選んだファイルは端末の中にコピーされ、以後はネットなしで使えます。</p>
+    <p class="status">「ファイル」アプリに置いたファイルを選びます。選んだファイルは端末の中にコピーされ、以後はネットなしで使えます。大きいファイルは保存に数十秒〜数分かかります。終わるまでこの画面を開いたままにしてください。</p>
+    <div id="impMsg"></div><div class="progress"><div id="impBar"></div></div>
     <div class="step"><h3>1. 問答データ（B0016_mobile_data.json）</h3>
       <div class="status ${st.data ? 'ok' : ''}">${st.data ? '取り込み済み：' + st.data.notes.length + 'ノート／' + Object.keys(st.data.pages).length + 'ページ（版 ' + esc(st.data.version || '-') + '）' : '未取り込み'}</div>
       <label class="btn filebtn">選ぶ<input type="file" id="fData" accept=".json,application/json"></label></div>
     <div class="step"><h3>2. 原本 PDF（圧縮版）</h3>
-      <div class="status ${st.pdfBlob ? 'ok' : ''}">${st.pdfBlob ? '取り込み済み：' + st.pdfPages + 'ページ／' + (st.pdfBlob.size / 1048576).toFixed(0) + 'MB' : '未取り込み'}</div>
+      <div class="status ${st.pdfBlob ? 'ok' : ''}">${st.pdfBlob ? '取り込み済み：' + st.pdfPages + 'ページ／' + MB(st.pdfBlob.size) : '未取り込み'}</div>
+      ${st.loadErr ? '<div class="status ng">' + esc(st.loadErr) + '</div>' : ''}
       <label class="btn filebtn">選ぶ<input type="file" id="fPdf" accept=".pdf,application/pdf"></label></div>
     <div class="step"><h3>3. 講義音声（B0016_mobile_audio.zip）※任意</h3>
       <div class="status ${audioN ? 'ok' : ''}">${audioN ? '取り込み済み：' + audioN + '本' : '未取り込み（講義音声のボタンは押せません）'}</div>
@@ -570,46 +647,65 @@ async function openImport() {
       <div class="status ${nVideo ? 'ok' : ''}">保存済み：${nVideo} / ${nNotes} 本${nVideo ? '（' + Object.keys(st.videos).sort().join('、') + '）' : ''}</div>
       <label class="btn filebtn">選ぶ<input type="file" id="fVideo" accept="video/mp4,.mp4" multiple></label>
       ${nVideo ? '<button class="btn sub" id="delVideo" style="margin-left:8px">動画をすべて削除</button>' : ''}</div>
-    <div id="impMsg" class="status"></div><div class="progress"><div id="impBar"></div></div>
+
     <p class="status">${est ? '使用中：' + (est.usage / 1048576).toFixed(0) + 'MB／上限の目安：' + (est.quota / 1073741824).toFixed(1) + 'GB' : ''}</p>`);
-  $('fData').onchange = (e) => importData(e.target.files[0]);
-  $('fPdf').onchange = (e) => importPdf(e.target.files[0]);
-  $('fAudio').onchange = (e) => importAudio(e.target.files[0]);
-  $('fVideo').onchange = (e) => importVideos([...e.target.files]);
-  if ($('delVideo')) $('delVideo').onclick = async () => {
+  const pick = (id, fn) => { $(id).onchange = (e) => { const fs = [...e.target.files]; e.target.value = ''; guarded(() => fn(fs)); }; };
+  pick('fData', (fs) => importData(fs[0]));
+  pick('fPdf', (fs) => importPdf(fs[0]));
+  pick('fAudio', (fs) => importAudio(fs[0]));
+  pick('fVideo', (fs) => importVideos(fs));
+  if ($('delVideo')) $('delVideo').onclick = () => guarded(async () => {
     for (const k of Object.keys(st.videos)) await DB.del('video:' + k);
-    st.videos = {}; openImport();
-  };
+    await loadStored(); await openImport(); impMsg('動画をすべて削除しました', 0);
+  });
 }
-function impMsg(t, p) { if ($('impMsg')) $('impMsg').textContent = t; if ($('impBar') && p != null) $('impBar').style.width = (p * 100).toFixed(0) + '%'; }
+function impMsg(t, p, cls = '') {
+  const m = $('impMsg'); if (m) { m.textContent = t; m.className = cls; }
+  if ($('impBar') && p != null) $('impBar').style.width = (Math.max(0, Math.min(1, p)) * 100).toFixed(0) + '%';
+}
 async function persist() { try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) {} }
+let busy = false;
+async function guarded(fn) {
+  if (busy) { toast('取り込み中です。終わるまでお待ちください'); return; }
+  busy = true; document.body.classList.add('busy');
+  try { await fn(); } finally { busy = false; document.body.classList.remove('busy'); }
+}
+const MB = (n) => (n / 1048576).toFixed(0) + 'MB';
 
 async function importData(f) {
   if (!f) return;
   try {
     impMsg('読み込み中…', 0.2);
-    const d = JSON.parse(await f.text());
+    let d;
+    try { d = JSON.parse(await f.text()); } catch (e) { throw new Error('ファイルを読めないか、JSON の形式ではありません'); }
     if (!d.pages || !d.notes || d.format !== 1) throw new Error('AIReaderGO の問答データではありません');
     await DB.put('data', { value: d, name: f.name, t: Date.now() });
-    await persist(); await loadStored(); impMsg('取り込みました', 1); renderSummary(); openImport();
-  } catch (e) { impMsg('取り込めませんでした：' + e.message, 0); }
+    await persist(); await loadStored(); renderSummary(); refreshPdf();
+    await openImport(); impMsg(`取り込みました（${Object.keys(d.pages).length}ページ分）`, 1, 'ok');
+  } catch (e) { impMsg('取り込めませんでした：' + saveError(e), 0, 'ng'); }
 }
 async function importPdf(f) {
   if (!f) return;
   try {
-    impMsg('PDF を確かめています…', 0.1);
-    const buf = await f.slice(0, Math.min(f.size, 1024)).text();
-    if (!buf.startsWith('%PDF')) throw new Error('PDF ではありません');
-    const doc = await pdfFromBlob(f);
-    const n = doc.numPages; await doc.destroy();
+    impMsg(`PDF を確かめています…（${f.name}／${MB(f.size)}）`, 0.02);
+    let head;
+    try { head = await f.slice(0, 1024).text(); } catch (e) { throw readError(e); }
+    if (!head.startsWith('%PDF')) throw new Error('PDF ではありません');
+    impMsg(`端末に保存しています… 0%（${MB(f.size)}）`, 0.03);
+    await DB.putFile('pdf', f, { name: f.name, pages: 0, type: 'application/pdf' },
+      (r) => impMsg(`端末に保存しています… ${(r * 100).toFixed(0)}%（${MB(f.size)}）`, 0.03 + r * 0.87));
+    impMsg('保存した PDF を開けるか確かめています…', 0.92);
+    const saved = await DB.getFile('pdf');
+    let n;
+    try { const doc = await withTimeout(pdfFromBlob(saved.blob), 60000, 'PDF を開けませんでした（時間切れ）'); n = doc.numPages; await doc.destroy(); }
+    catch (e) { await DB.del('pdf'); throw new Error('PDF として開けませんでした：' + (e.message || e)); }
+    saved.pages = n; delete saved.blob;
+    await DB.put('pdf', saved);
+    await persist(); await loadStored(); renderSummary(); refreshPdf();
     const expect = st.data ? st.data.pdf_pages : 736;
-    if (expect && n !== expect && !confirm(`この PDF は ${n} ページです（問答データは ${expect} ページ前提）。ページがずれる可能性があります。取り込みますか？`)) { impMsg('中止しました', 0); return; }
-    impMsg('端末に保存しています…', 0.5);
-    await DB.put('pdf', { blob: f, name: f.name, pages: n, t: Date.now() });
-    if (st.pdf) { try { await st.pdf.destroy(); } catch (e) {} }
-    await persist(); await loadStored(); st.rendered = { pdfNo: 0, canvas: null };
-    impMsg(`取り込みました（${n}ページ）`, 1); openImport();
-  } catch (e) { impMsg('取り込めませんでした：' + e.message, 0); }
+    await openImport();
+    impMsg(`取り込みました（${n}ページ／${MB(f.size)}）` + (expect && n !== expect ? `。注意：問答データは ${expect} ページ前提のため、ページがずれます` : ''), 1, expect && n !== expect ? 'ng' : 'ok');
+  } catch (e) { impMsg('取り込めませんでした：' + saveError(e), 0, 'ng'); }
 }
 // zip（無圧縮）の目次を読み、各音声の位置だけを記録する（中身はそのまま保存）
 async function readZipIndex(blob) {
@@ -646,13 +742,15 @@ async function readZipIndex(blob) {
 async function importAudio(f) {
   if (!f) return;
   try {
-    impMsg('音声の目次を読んでいます…', 0.05);
-    const index = await readZipIndex(f);
+    impMsg('音声の目次を読んでいます…', 0.02);
+    let index;
+    try { index = await readZipIndex(f); } catch (e) { throw e.name === 'NotReadableError' ? readError(e) : e; }
     const n = Object.keys(index).length; if (!n) throw new Error('音声（mp3）が入っていません');
-    impMsg(`端末に保存しています…（${(f.size / 1048576).toFixed(0)}MB）`, 0.6);
-    await DB.put('audio', { blob: f, index, name: f.name, t: Date.now() });
-    await persist(); await loadStored(); impMsg(`取り込みました（${n}本）`, 1); openImport();
-  } catch (e) { impMsg('取り込めませんでした：' + e.message, 0); }
+    await DB.putFile('audio', f, { name: f.name, index, type: 'application/zip' },
+      (r) => impMsg(`端末に保存しています… ${(r * 100).toFixed(0)}%（${MB(f.size)}）`, 0.5 + r * 0.5));
+    await persist(); await loadStored();
+    await openImport(); impMsg(`取り込みました（${n}本）`, 1, 'ok');
+  } catch (e) { impMsg('取り込めませんでした：' + saveError(e), 0, 'ng'); }
 }
 async function importVideos(files) {
   if (!files.length) return;
@@ -660,41 +758,80 @@ async function importVideos(files) {
   let ok = 0; const skipped = [];
   for (let i = 0; i < files.length; i++) {
     const f = files[i], id = f.name.replace(/\.mp4$/i, '');
-    if (ids && !ids.has(id)) { skipped.push(f.name); continue; }
-    impMsg(`動画を保存しています… ${i + 1}/${files.length}（${f.name}）`, i / files.length);
-    try { await DB.put('video:' + id, { blob: f, name: f.name, t: Date.now() }); ok++; }
-    catch (e) { skipped.push(f.name + '（' + e.message + '）'); }
+    if (ids && !ids.has(id)) { skipped.push(f.name + '（名前がノート名と違います）'); continue; }
+    try {
+      await DB.putFile('video:' + id, f, { name: f.name, type: 'video/mp4' },
+        (r) => impMsg(`動画を保存しています… ${i + 1}/${files.length}（${f.name}／${MB(f.size)}） ${(r * 100).toFixed(0)}%`, (i + r) / files.length));
+      ok++;
+    } catch (e) {
+      skipped.push(f.name + '（' + saveError(e) + '）');
+      try { await DB.del('video:' + id); } catch (e2) {}
+      if (/容量/.test(saveError(e))) break;
+    }
   }
   await persist(); await loadStored();
-  impMsg(`${ok}本を保存しました${skipped.length ? '。取り込めなかったもの：' + skipped.join('、') : ''}`, 1);
-  setTimeout(openImport, 1200);
+  await openImport();
+  impMsg(`${ok}本を保存しました${skipped.length ? '。取り込めなかったもの：' + skipped.join('、') : ''}`, 1, skipped.length ? 'ng' : 'ok');
 }
 
-// ───────── iPad の横向き：2分割表示 ─────────
-const SPLIT_MQ = window.matchMedia('(orientation: landscape) and (min-width: 900px)');
+// ───────── 画面の形 ─────────
+// 見えている高さをそのまま使う（iPhone の Safari では 100vh が実際より高いため）
+function setAppHeight() {
+  const h = window.visualViewport && !document.activeElement.matches('input,textarea') ? window.visualViewport.height : window.innerHeight;
+  document.documentElement.style.setProperty('--appH', Math.round(Math.min(h, window.innerHeight)) + 'px');
+}
+const TOUCH = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 1;
 function applyLayout() {
-  const split = SPLIT_MQ.matches;
+  setAppHeight();
+  const W = window.innerWidth, H = window.innerHeight;
+  const autoSplit = TOUCH && W > H && W >= 900;
+  const split = S.layout === 'split' ? W >= 700 : S.layout === 'single' ? false : autoSplit;
+  const desk = !TOUCH && !split && W > 560;
+  const was = st.split;
   st.split = split;
   document.body.classList.toggle('split', split);
+  document.body.classList.toggle('desk', desk);
   st.rendered = { pdfNo: 0, canvas: null };
   if (split) {
     st.locked = false; $('lockBar').hidden = true; $('btnOrig').classList.remove('locked', 'on');
     st.showingPdf = true; $('pdfView').hidden = false; renderPdf();
-  } else if (!st.locked) {
+  } else if (was) {
     showPdf(false); prerenderPdf();
-  } else {
+  } else if (st.showingPdf) {
     renderPdf();
+  } else {
+    prerenderPdf();
   }
 }
+
+// 左右の ‹ › ボタン（パソコンやスワイプしにくいとき用）
+$('btnPrev').addEventListener('click', () => goto(st.pdfNo - 1));
+$('btnNext').addEventListener('click', () => goto(st.pdfNo + 1));
+
+// 思わぬエラーは画面に出す（何も起きない状態を避ける）
+window.addEventListener('error', (e) => { if (e.message && !/ResizeObserver/.test(e.message)) toast('エラー：' + e.message, 5000); });
+window.addEventListener('unhandledrejection', (e) => { const r = e.reason; toast('エラー：' + ((r && r.message) || r), 5000); });
 
 // ───────── 起動 ─────────
 (async function start() {
   applySettings();
   try { await DB.open(); await loadStored(); } catch (e) { toast('端末の保存領域を開けませんでした：' + e.message, 5000); }
-  renderSummary(); prerenderPdf();
-  if (!st.data) openImport();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   applyLayout();
+  renderSummary();
+  if (!st.data) openImport();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch(() => {});
+    // 新しい版が入ったら一度だけ読み込み直す（古い部品と新しい部品が混ざらないように）
+    // （初めて開いたときは読み込み直さない。取り込みの途中も読み込み直さない）
+    let reloaded = false;
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded || busy) return; reloaded = true; location.reload();
+    });
+  }
   let rz = 0;
-  window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(applyLayout, 150); });
+  const onResize = () => { setAppHeight(); clearTimeout(rz); rz = setTimeout(applyLayout, 200); };
+  window.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', onResize);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', setAppHeight);
 })();
