@@ -1,6 +1,6 @@
 // アプリ本体だけを保存してオフラインで開けるようにする（本のデータは IndexedDB に保存）
 // 通信できるときは常に最新の本体を取りに行き、できないときだけ保存した本体を使う
-const CACHE = 'aireadergo-mobile-0.3.1';
+const CACHE = 'aireadergo-mobile-0.4.0';
 const FILES = ['./', 'index.html', 'manifest.webmanifest',
   'marked.min.js', 'pdf.min.js', 'pdf.worker.min.js',
   'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];

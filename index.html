@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="aireadergo-version" content="0.3.1">
+<meta name="aireadergo-version" content="0.4.0">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -201,15 +201,15 @@ body.split #btnOrig, body.split #lockBar{display:none}
   <div id="toast" hidden></div>
 </div>
 
-<script src="marked.min.js?v=0.3.1"></script>
-<script src="pdf.min.js?v=0.3.1"></script>
+<script src="marked.min.js?v=0.4.0"></script>
+<script src="pdf.min.js?v=0.4.0"></script>
 <script>
 /* AIReaderGO モバイル版（iPhone・iPad）
  * 本の内容はこのプログラムに含まない。原本 PDF・問答データ・音声・動画は
  * 利用者が「ファイル」アプリから取り込み、端末の中（IndexedDB）に保存する。
  */
 'use strict';
-const APP_VERSION = '0.3.1';
+const APP_VERSION = '0.4.0';
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
 marked.setOptions({ mangle: false, headerIds: false });
 
@@ -579,7 +579,10 @@ function closeSheet() {
 const BTN_ORDER = ['formula', 'calc', 'terms', 'compare', 'exam', 'context', 'quiz', 'caution'];
 function audioKey(e) { return e ? `${e.note_id}/p${e.page}` : ''; }
 function hasAudio(e) { return !!(st.audio && e && st.audio.index[audioKey(e)]); }
-function hasVideo(e) { return !!(e && st.videos[e.note_id]); }
+const VKIND = { std: { suffix: '', label: '講義動画（通常）', chap: 'video_chapters' },
+                easy: { suffix: '_easy', label: '講義動画（高校生向け）', chap: 'video_chapters_easy' } };
+function videoKey(e, kind) { return e ? e.note_id + VKIND[kind].suffix : ''; }
+function hasVideo(e, kind = 'std') { return !!(e && st.videos[videoKey(e, kind)]); }
 
 function openMenu() {
   st.sheetStack = [openMenu];
@@ -595,10 +598,16 @@ function openMenu() {
   parts.push(`<button data-act="overview">この章の全体像</button>`);
   if (sectionOf(e)) parts.push(`<button data-act="section">この節の要点</button>`);
   parts.push('<h3>講義</h3>');
-  const ha = hasAudio(e), hv = hasVideo(e);
+  const ha = hasAudio(e), hv = hasVideo(e, 'std'), he = hasVideo(e, 'easy');
   parts.push(`<button data-act="${ha ? 'audio' : ''}" class="${ha ? '' : 'dis'}" aria-disabled="${!ha}">講義音声</button>`);
-  parts.push(`<button data-act="${hv ? 'video' : ''}" class="${hv ? '' : 'dis'}" aria-disabled="${!hv}">講義動画</button>`);
-  if (!ha || !hv) parts.push(`<div class="note">${!ha ? '講義音声は取り込まれていません。' : ''}${!hv ? 'このノートの講義動画は保存されていません。' : ''}</div>`);
+  parts.push(`<button data-act="${hv ? 'video' : ''}" data-kind="std" class="${hv ? '' : 'dis'}" aria-disabled="${!hv}">講義動画（通常）</button>`);
+  parts.push(`<button data-act="${he ? 'video' : ''}" data-kind="easy" class="${he ? '' : 'dis'}" aria-disabled="${!he}">講義動画（高校生向け）</button>`);
+  const miss = [];
+  if (!ha) miss.push('講義音声は取り込まれていません。');
+  if (!hv && !he) miss.push('このノートの講義動画は保存されていません。');
+  else if (!hv) miss.push('通常版の動画は保存されていません。');
+  else if (!he) miss.push('高校生向けの動画は保存されていません。');
+  if (miss.length) parts.push(`<div class="note">${miss.join('')}</div>`);
   parts.push('<h3>質問</h3>');
   parts.push(`<button data-act="claude">Claude に質問</button>`);
   parts.push('</div>');
@@ -613,7 +622,7 @@ $('sheetBody').addEventListener('click', (ev) => {
   else if (act === 'overview') showOverview();
   else if (act === 'section') showSection();
   else if (act === 'audio') showAudio();
-  else if (act === 'video') showVideo();
+  else if (act === 'video') showVideo(t.dataset.kind || 'std');
   else if (act === 'claude') showClaude();
   else if (act === 'term') showTerm(+t.dataset.i);
   else if (act === 'choice') answerQuiz(+t.dataset.q, t.dataset.c);
@@ -692,17 +701,19 @@ function showAudio() {
   sheetShow('講義音声', `<p class="status">p.${e.page} の講義音声です。</p><audio controls preload="metadata" src="${url}"></audio>`, { back: true });
 }
 // 講義動画：このページのチャプター位置から再生
-async function showVideo() {
-  const e = entry(); if (!hasVideo(e)) return;
+async function showVideo(kind = 'std') {
+  const e = entry(); if (!hasVideo(e, kind)) return;
   let v = null;
-  try { v = await DB.getFile('video:' + e.note_id); } catch (err) { toast(err.message, 5000); return; }
+  try { v = await DB.getFile('video:' + videoKey(e, kind)); } catch (err) { toast(err.message, 5000); return; }
   if (!v) { toast('動画が見つかりません'); return; }
   const n = noteOf(e);
   revokeUrls();
-  const start = (n && n.video_chapters && n.video_chapters[String(st.pdfNo)]) || 0;
+  const chap = n && n[VKIND[kind].chap];
+  const start = (chap && chap[String(st.pdfNo)]) || 0;
   const url = objUrl(v.blob);
-  push(showVideo);
-  sheetShow('講義動画', `<p class="status">${esc(n ? n.title : e.note_id)}／p.${e.page} の位置から再生します。</p>
+  push(() => showVideo(kind));
+  const where = start ? `p.${e.page} の位置から再生します。` : (chap && Object.keys(chap).length ? 'このページの位置が見つからないため、最初から再生します。' : '問答データにこの動画の位置の情報が無いため、最初から再生します（問答データを作り直すと、ページの位置から再生できます）。');
+  sheetShow(VKIND[kind].label, `<p class="status">${esc(n ? n.title : e.note_id)}／${where}</p>
     <video id="vid" controls playsinline preload="metadata" src="${url}"></video>`, { full: true, back: true });
   const vid = $('vid');
   const seek = () => { try { if (start && vid.currentTime < 0.5) vid.currentTime = start; } catch (err) {} };
@@ -817,7 +828,7 @@ async function exportRecords() {
     LS.set('lastExport', Date.now()); toast('書き出しました。「ファイルに保存」を選んでください');
   } catch (e) { if (e.name !== 'AbortError') toast('書き出せませんでした：' + e.message); }
 }
-async function importRecords(f) {
+async function importRecords(f, reopen = true) {
   if (!f) return;
   try {
     const r = JSON.parse(await f.text());
@@ -826,19 +837,26 @@ async function importRecords(f) {
     for (const [k, v] of Object.entries(r.quiz || {})) if (!cur[k] || (v.t || 0) > (cur[k].t || 0)) cur[k] = v;
     LS.set('quiz', cur);
     const key = S.apiKey; Object.assign(S, r.settings || {}); S.apiKey = key; saveSettings(); applySettings();
-    toast('記録を読み込みました'); openSettings();
-  } catch (e) { toast('読み込めませんでした：' + e.message); }
+    toast('記録を読み込みました'); if (reopen) openSettings();
+    return true;
+  } catch (e) { toast('読み込めませんでした：' + e.message); return false; }
 }
 function applySettings() { document.documentElement.style.setProperty('--fs', S.fontSize + 'px'); }
 
 // 取り込み
 async function openImport() {
   const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null;
-  const nVideo = Object.keys(st.videos).length, nNotes = st.data ? st.data.notes.length : 35;
+  const vids = Object.keys(st.videos), nNotes = st.data ? st.data.notes.length : 35;
+  const nVideo = vids.length, nEasy = vids.filter((k) => k.endsWith('_easy')).length, nStd = nVideo - nEasy;
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  let persisted = null; try { persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : null; } catch (e) {}
   const audioN = st.audio ? Object.keys(st.audio.index).length : 0;
   panel('データの取り込み', `
     <p class="status">「ファイル」アプリに置いたファイルを選びます。選んだファイルは端末の中にコピーされ、以後はネットなしで使えます。大きいファイルは保存に数十秒〜数分かかります。終わるまでこの画面を開いたままにしてください。</p>
     <div id="impMsg"></div><div class="progress"><div id="impBar"></div></div>
+    <div class="step"><h3>まとめて取り込む</h3>
+      <div class="status">問答データ・原本 PDF・講義音声・講義動画・記録ファイルを、いくつでも一度に選べます。種類は自動で見分けます。</div>
+      <label class="btn filebtn">まとめて選ぶ<input type="file" id="fAll" multiple></label></div>
     <div class="step"><h3>1. 問答データ（B0016_mobile_data.json）</h3>
       <div class="status ${st.data ? 'ok' : ''}">${st.data ? '取り込み済み：' + st.data.notes.length + 'ノート／' + Object.keys(st.data.pages).length + 'ページ（版 ' + esc(st.data.version || '-') + '）' : '未取り込み'}</div>
       <label class="btn filebtn">選ぶ<input type="file" id="fData" accept=".json,application/json"></label></div>
@@ -849,17 +867,22 @@ async function openImport() {
     <div class="step"><h3>3. 講義音声（B0016_mobile_audio.zip）※任意</h3>
       <div class="status ${audioN ? 'ok' : ''}">${audioN ? '取り込み済み：' + audioN + '本' : '未取り込み（講義音声のボタンは押せません）'}</div>
       <label class="btn filebtn">選ぶ<input type="file" id="fAudio" accept=".zip,application/zip"></label></div>
-    <div class="step"><h3>4. 講義動画（ノート名.mp4、複数選べます）※任意</h3>
-      <div class="status ${nVideo ? 'ok' : ''}">保存済み：${nVideo} / ${nNotes} 本${nVideo ? '（' + Object.keys(st.videos).sort().join('、') + '）' : ''}</div>
+    <div class="step"><h3>4. 講義動画（ノート名.mp4／ノート名_easy.mp4、複数選べます）※任意</h3>
+      <div class="status ${nVideo ? 'ok' : ''}">通常版：${nStd} / ${nNotes} 本、高校生向け：${nEasy} / ${nNotes} 本</div>
+      ${nVideo ? '<div class="status">' + esc(vids.sort().join('、')) + '</div>' : ''}
       <label class="btn filebtn">選ぶ<input type="file" id="fVideo" accept="video/mp4,.mp4" multiple></label>
       ${nVideo ? '<button class="btn sub" id="delVideo" style="margin-left:8px">動画をすべて削除</button>' : ''}</div>
 
-    <p class="status">${est ? '使用中：' + (est.usage / 1048576).toFixed(0) + 'MB／上限の目安：' + (est.quota / 1073741824).toFixed(1) + 'GB' : ''}</p>`);
+    <p class="status">${est ? '使用中：' + (est.usage / 1048576).toFixed(0) + 'MB／上限の目安：' + (est.quota / 1073741824).toFixed(1) + 'GB' : ''}</p>
+    <div class="step"><h3>保存の状態</h3>
+      <div class="status ${standalone ? 'ok' : 'ng'}">${standalone ? 'ホーム画面のアプリとして開いています。' : 'Safari のタブで開いています。Safari の履歴・Webサイトデータを消すと、取り込んだデータと設定が消えます。ホーム画面に追加したアイコンから開いてください。'}</div>
+      <div class="status">${persisted === true ? '端末に「消さないで」と登録済みです（容量が足りないときに自動で消されにくくなります）。' : persisted === false ? '「消さないで」の登録は、まだ認められていません。' : ''}</div></div>`);
   const pick = (id, fn) => { $(id).onchange = (e) => { const fs = [...e.target.files]; e.target.value = ''; guarded(() => fn(fs)); }; };
   pick('fData', (fs) => importData(fs[0]));
   pick('fPdf', (fs) => importPdf(fs[0]));
   pick('fAudio', (fs) => importAudio(fs[0]));
   pick('fVideo', (fs) => importVideos(fs));
+  pick('fAll', (fs) => importAll(fs));
   if ($('delVideo')) $('delVideo').onclick = () => guarded(async () => {
     for (const k of Object.keys(st.videos)) await DB.del('video:' + k);
     await loadStored(); await openImport(); impMsg('動画をすべて削除しました', 0);
@@ -958,13 +981,36 @@ async function importAudio(f) {
     await openImport(); impMsg(`取り込みました（${n}本）`, 1, 'ok');
   } catch (e) { impMsg('取り込めませんでした：' + saveError(e), 0, 'ng'); }
 }
+// まとめて取り込む：種類を見分けて、問答データ → 記録 → PDF → 音声 → 動画 の順に処理する
+async function importAll(files) {
+  if (!files.length) return;
+  const json = [], pdf = [], zip = [], mp4 = [], other = [];
+  for (const f of files) {
+    const n = f.name.toLowerCase();
+    if (n.endsWith('.json')) json.push(f); else if (n.endsWith('.pdf')) pdf.push(f);
+    else if (n.endsWith('.zip')) zip.push(f); else if (n.endsWith('.mp4')) mp4.push(f); else other.push(f.name);
+  }
+  const done = [];
+  for (const f of json) {
+    let kind = '';
+    try { const head = JSON.parse(await f.text()); kind = head.format === 'aireadergo-records' ? 'rec' : head.format === 1 && head.pages ? 'data' : ''; } catch (e) {}
+    if (kind === 'data') { await importData(f); done.push('問答データ'); }
+    else if (kind === 'rec') { if (await importRecords(f, false)) done.push('記録と設定'); }
+    else other.push(f.name);
+  }
+  if (pdf[0]) { await importPdf(pdf[0]); done.push('原本 PDF'); }
+  if (zip[0]) { await importAudio(zip[0]); done.push('講義音声'); }
+  if (mp4.length) { await importVideos(mp4); done.push(`講義動画 ${mp4.length}本`); }
+  await openImport();
+  impMsg(`まとめて取り込み：${done.join('、') || 'なし'}${other.length ? '。使えないファイル：' + other.join('、') : ''}`, 1, other.length ? 'ng' : 'ok');
+}
 async function importVideos(files) {
   if (!files.length) return;
   const ids = st.data ? new Set(st.data.notes.map((n) => n.note_id)) : null;
   let ok = 0; const skipped = [];
   for (let i = 0; i < files.length; i++) {
     const f = files[i], id = f.name.replace(/\.mp4$/i, '');
-    if (ids && !ids.has(id)) { skipped.push(f.name + '（名前がノート名と違います）'); continue; }
+    if (ids && !ids.has(id.replace(/_easy$/, ''))) { skipped.push(f.name + '（名前がノート名と違います）'); continue; }
     try {
       await DB.putFile('video:' + id, f, { name: f.name, type: 'video/mp4' },
         (r) => impMsg(`動画を保存しています… ${i + 1}/${files.length}（${f.name}／${MB(f.size)}） ${(r * 100).toFixed(0)}%`, (i + r) / files.length));
